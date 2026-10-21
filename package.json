@@ -1,0 +1,21 @@
+{
+  "name": "gotalert",
+  "version": "1.0.0",
+  "description": "GotAlert — monitoramento inteligente do consumo de água (projeto goIT)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "seed": "node scripts/seed.js",
+    "simulate": "node scripts/simulator.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}

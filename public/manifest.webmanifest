@@ -1,0 +1,15 @@
+{
+  "name": "GotAlert — Monitoramento inteligente de água",
+  "short_name": "GotAlert",
+  "description": "Acompanhe o consumo de água e receba alertas de vazamento.",
+  "lang": "pt-BR",
+  "start_url": "/#/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#050C9C",
+  "theme_color": "#050C9C",
+  "icons": [
+    { "src": "/img/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
