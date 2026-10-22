@@ -3,6 +3,7 @@ import path from 'node:path';
 import { PORT, ROOT } from './config.js';
 import express from 'express';
 import { requireAuth } from './auth.js';
+import { dialect } from './db.js';
 import alertsRoutes from './routes/alerts.js';
 import authRoutes from './routes/auth.js';
 import consumptionRoutes from './routes/consumption.js';
@@ -30,6 +31,7 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`\nGotAlert rodando em http://localhost:${PORT}`);
+  console.log(`Banco de dados: ${dialect === 'mysql' ? 'TiDB/MySQL (DATABASE_URL)' : 'SQLite (data/gotalert.db)'}`);
   // Endereços da rede local, para abrir no celular conectado ao mesmo Wi-Fi
   for (const addrs of Object.values(os.networkInterfaces())) {
     for (const a of addrs ?? []) {

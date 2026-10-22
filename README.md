@@ -55,6 +55,30 @@ Conta de demonstração: **julia@exemplo.com** / **gotalert123**
 Copie `.env.example` para `.env` para mudar a porta, o fuso horário ou desligar o modo demonstração
 (`DEMO_MODE=false`) quando o sensor de verdade estiver ligado.
 
+### Banco de dados na nuvem (TiDB Cloud)
+
+Por padrão o GotAlert usa o **SQLite** (arquivo `data/gotalert.db`), que não precisa de configuração.
+Para guardar os dados na nuvem, use o **TiDB Cloud Starter** (gratuito, compatível com MySQL):
+
+1. Crie uma conta em [tidbcloud.com](https://tidbcloud.com) e um cluster **Starter**.
+2. No cluster, clique em **Connect**, escolha **Connect With: General** e gere a senha.
+3. Copie `.env.example` para `.env` e preencha a `DATABASE_URL` com os dados mostrados:
+   ```
+   DATABASE_URL=mysql://USUARIO:SENHA@HOST:4000/gotalert
+   ```
+   O usuário do TiDB tem um prefixo (ex.: `3xYz.root`). Se a senha tiver caracteres especiais
+   (`@ : / # ?`), troque por códigos de URL (ex.: `@` vira `%40`).
+4. Rode `npm start`. O banco `gotalert` e as tabelas são criados sozinhos na primeira vez.
+5. Para levar os dados que já estão no SQLite: `npm run migrate`
+   (ou `npm run seed` para criar só a conta de demonstração).
+
+Sem `DATABASE_URL`, o app volta a usar o SQLite. Nunca suba o `.env` para o GitHub: ele tem a senha do banco.
+
+| Comando extra | O que faz |
+|---|---|
+| `npm run migrate` | Copia todos os dados do SQLite local para o TiDB (`-- --force` apaga o destino antes) |
+| `npm run reset-password -- email senha` | Troca a senha de uma conta |
+
 ---
 
 ## O que já foi feito
@@ -82,7 +106,7 @@ Também:
 
 ### Servidor e API (back-end)
 
-- **Node.js + Express**, com banco **SQLite** (arquivo em `data/gotalert.db`).
+- **Node.js + Express**, com banco **SQLite** (arquivo em `data/gotalert.db`) ou **TiDB Cloud / MySQL** (variável `DATABASE_URL`).
 - **Login com token (JWT)**, senhas salvas com hash (bcrypt) e validação de todos os campos, com mensagens em português.
 - **API do sensor** separada, autenticada pela chave do aparelho (`X-Device-Key`). Aceita uma leitura ou um lote, e um "sinal de vida" para mostrar o aparelho conectado mesmo sem consumo.
 - **Um único módulo por casa**, seguindo a diretriz do produto.
@@ -198,7 +222,7 @@ um vazamento.
 server/
   index.js            servidor Express (API + arquivos do app)
   config.js           configurações (.env)
-  db.js               banco SQLite e tabelas
+  db.js               banco (SQLite ou TiDB/MySQL) e tabelas
   auth.js             login com JWT e autenticação do sensor
   http.js             erros e validação dos campos
   models.js           conversão do banco para o formato da API
@@ -210,6 +234,8 @@ server/
 scripts/
   seed.js             dados de demonstração
   simulator.js        simulador do sensor
+  migrate-to-tidb.js  copia os dados do SQLite para o TiDB
+  reset-password.js   troca a senha de uma conta
 public/               front-end (HTML, CSS e JavaScript sem framework)
   index.html          página única do app
   css/styles.css      identidade visual e layout

@@ -15,6 +15,8 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 export const PORT = Number(process.env.PORT) || 3000;
 export const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, 'gotalert.db');
+// Se definida, usa o TiDB Cloud (ou MySQL) em vez do SQLite. Ex.: mysql://usuario:senha@host:4000/gotalert
+export const DATABASE_URL = process.env.DATABASE_URL?.trim() || '';
 export const DEMO_MODE = process.env.DEMO_MODE !== 'false';
 export const JWT_SECRET = process.env.JWT_SECRET || loadOrCreateSecret();
 

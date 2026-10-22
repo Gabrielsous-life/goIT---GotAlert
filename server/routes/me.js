@@ -7,39 +7,38 @@ import { getSettings, toSettings, toUser } from '../models.js';
 
 const router = Router();
 
-const userById = db.prepare('SELECT * FROM users WHERE id = ?');
-const emailTaken = db.prepare('SELECT 1 FROM users WHERE email = ? AND id <> ?');
-const updateUser = db.prepare('UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?');
-const updatePassword = db.prepare('UPDATE users SET password_hash = ? WHERE id = ?');
+const userById = (id) => db.get('SELECT * FROM users WHERE id = ?', [id]);
 
-const meResponse = (userId) => ({
-  user: toUser(userById.get(userId)),
-  settings: toSettings(getSettings(userId)),
+const meResponse = async (userId) => ({
+  user: toUser(await userById(userId)),
+  settings: toSettings(await getSettings(userId)),
   demoMode: DEMO_MODE,
 });
 
-router.get('/me', (req, res) => res.json(meResponse(req.userId)));
+router.get('/me', async (req, res) => res.json(await meResponse(req.userId)));
 
-router.patch('/me', (req, res) => {
+router.patch('/me', async (req, res) => {
   const body = req.body ?? {};
   const name = text(body.name, 'Nome', { min: 2, max: 80 });
   const mail = email(body.email);
   const phone = text(body.phone, 'Telefone', { min: 8, max: 20, optional: true });
   if (phone && !/^[\d\s()+-]+$/.test(phone)) throw new HttpError(400, 'Telefone: use só números, espaços, parênteses e traço.');
-  if (emailTaken.get(mail, req.userId)) throw new HttpError(409, 'Já existe outra conta com este e-mail.');
+  if (await db.get('SELECT 1 AS taken FROM users WHERE email = ? AND id <> ?', [mail, req.userId])) {
+    throw new HttpError(409, 'Já existe outra conta com este e-mail.');
+  }
 
-  updateUser.run(name, mail, phone, req.userId);
-  res.json(meResponse(req.userId));
+  await db.run('UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?', [name, mail, phone, req.userId]);
+  res.json(await meResponse(req.userId));
 });
 
-router.patch('/me/password', (req, res) => {
+router.patch('/me/password', async (req, res) => {
   const body = req.body ?? {};
-  const user = userById.get(req.userId);
-  if (typeof body.current !== 'string' || !bcrypt.compareSync(body.current, user.password_hash)) {
+  const user = await userById(req.userId);
+  if (typeof body.current !== 'string' || !(await bcrypt.compare(body.current, user.password_hash))) {
     throw new HttpError(400, 'A senha atual está incorreta.');
   }
   const next = password(body.next, 'Nova senha');
-  updatePassword.run(bcrypt.hashSync(next, 10), req.userId);
+  await db.run('UPDATE users SET password_hash = ? WHERE id = ?', [await bcrypt.hash(next, 10), req.userId]);
   res.json({ ok: true });
 });
 
@@ -56,7 +55,7 @@ const SETTINGS_FIELDS = {
   dailyLimitL: ['daily_limit_l', (v) => (v === null || v === '' ? null : num(v, 'Limite diário', 50, 10000))],
 };
 
-router.patch('/settings', (req, res) => {
+router.patch('/settings', async (req, res) => {
   const body = req.body ?? {};
   const sets = [];
   const values = [];
@@ -65,8 +64,8 @@ router.patch('/settings', (req, res) => {
     sets.push(`${column} = ?`);
     values.push(parse(body[field]));
   }
-  if (sets.length) db.prepare(`UPDATE settings SET ${sets.join(', ')} WHERE user_id = ?`).run(...values, req.userId);
-  res.json({ settings: toSettings(getSettings(req.userId)) });
+  if (sets.length) await db.run(`UPDATE settings SET ${sets.join(', ')} WHERE user_id = ?`, [...values, req.userId]);
+  res.json({ settings: toSettings(await getSettings(req.userId)) });
 });
 
 export default router;

@@ -27,20 +27,20 @@ function parseReading(r, now) {
 }
 
 // Aceita uma leitura { liters, ts? } ou um lote { readings: [...] }
-router.post('/readings', (req, res) => {
+router.post('/readings', async (req, res) => {
   const now = Date.now();
   const body = req.body ?? {};
   const list = Array.isArray(body.readings) ? body.readings : [body];
   if (list.length > MAX_BATCH) throw new HttpError(400, `Envie no máximo ${MAX_BATCH} leituras por vez.`);
 
-  const { accepted, alerts } = recordReadings(req.device, list.map((r) => parseReading(r, now)), { now });
+  const { accepted, alerts } = await recordReadings(req.device, list.map((r) => parseReading(r, now)), { now });
   res.json({ accepted, newAlerts: alerts.map((a) => ({ id: a.id, type: a.type, title: a.title })) });
 });
 
 // Sinal de vida: o app mostra o aparelho como conectado mesmo quando ninguém usa água.
-router.post('/heartbeat', (req, res) => {
+router.post('/heartbeat', async (req, res) => {
   const now = Date.now();
-  db.prepare('UPDATE devices SET last_seen_at = ? WHERE id = ?').run(now, req.device.id);
+  await db.run('UPDATE devices SET last_seen_at = ? WHERE id = ?', [now, req.device.id]);
   res.json({ ok: true, serverTime: now });
 });
 

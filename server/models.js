@@ -1,11 +1,8 @@
 import { db } from './db.js';
 import { round1 } from './time.js';
 
-const deviceByUser = db.prepare('SELECT * FROM devices WHERE user_id = ?');
-const settingsByUser = db.prepare('SELECT * FROM settings WHERE user_id = ?');
-
-export const getDevice = (userId) => deviceByUser.get(userId) ?? null;
-export const getSettings = (userId) => settingsByUser.get(userId);
+export const getDevice = async (userId) => (await db.get('SELECT * FROM devices WHERE user_id = ?', [userId])) ?? null;
+export const getSettings = (userId) => db.get('SELECT * FROM settings WHERE user_id = ?', [userId]);
 
 export const toUser = (u) => ({
   id: u.id,

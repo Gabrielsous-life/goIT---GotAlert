@@ -9,28 +9,27 @@ import { HOUR, MIN, addDays, dayKey, parseDayKey, round1, startOfDay } from '../
 const router = Router();
 
 const ANOMALY_TYPES = "('leak', 'night')";
-const unreadCount = db.prepare('SELECT COUNT(*) AS n FROM alerts WHERE user_id = ? AND read_at IS NULL');
-const latestUnread = db.prepare(`
+const LATEST_UNREAD = `
   SELECT * FROM alerts WHERE user_id = ? AND read_at IS NULL
   ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, created_at DESC LIMIT 1
-`);
-const anomaliesInRange = db.prepare(`
+`;
+const anomaliesInRange = (userId, before, after) => db.all(`
   SELECT period_start, period_end FROM alerts
   WHERE user_id = ? AND type IN ${ANOMALY_TYPES} AND period_start < ? AND period_end > ?
-`);
-const alertsInRange = db.prepare(`
+`, [userId, before, after]);
+const alertsInRange = (userId, before, after) => db.all(`
   SELECT * FROM alerts
   WHERE user_id = ? AND type <> 'maintenance' AND period_start < ? AND period_end > ?
   ORDER BY created_at
-`);
+`, [userId, before, after]);
 
 const changePct = (current, previous) => (previous > 0 ? round1(((current - previous) / previous) * 100) : null);
 
 // Horas do dia (0-23) cobertas por algum alerta de vazamento ou consumo de madrugada
-function anomalyHours(userId, dayStart) {
+async function anomalyHours(userId, dayStart) {
   const dayEnd = addDays(dayStart, 1);
   const hours = new Set();
-  for (const a of anomaliesInRange.all(userId, dayEnd, dayStart)) {
+  for (const a of await anomaliesInRange(userId, dayEnd, dayStart)) {
     const end = Math.min(a.period_end, dayEnd);
     for (let t = Math.max(a.period_start, dayStart); t < end; t += MIN) hours.add(new Date(t).getHours());
   }
@@ -44,59 +43,61 @@ function dayParam(value, now) {
   return day;
 }
 
-router.get('/consumption/summary', (req, res) => {
+router.get('/consumption/summary', async (req, res) => {
   const now = Date.now();
-  const unreadAlerts = unreadCount.get(req.userId).n;
-  const latest = latestUnread.get(req.userId);
+  const unreadAlerts = Number(
+    (await db.get('SELECT COUNT(*) AS n FROM alerts WHERE user_id = ? AND read_at IS NULL', [req.userId])).n,
+  );
+  const latest = await db.get(LATEST_UNREAD, [req.userId]);
   const latestAlert = latest ? toAlert(latest) : null;
 
-  const device = getDevice(req.userId);
+  const device = await getDevice(req.userId);
   if (!device) return res.json({ hasDevice: false, now, unreadAlerts, latestAlert });
 
   const today = startOfDay(now);
   const yesterday = addDays(today, -1);
-  const todayTotal = sumBetween(device.id, today, now + MIN);
+  const todayTotal = await sumBetween(device.id, today, now + MIN);
   // Compara com ontem até o mesmo horário, senão o dia de hoje sempre pareceria menor.
-  const yesterdaySameTime = sumBetween(device.id, yesterday, yesterday + (now - today));
-  const { avg, days } = averageDaily(device.id, today);
+  const yesterdaySameTime = await sumBetween(device.id, yesterday, yesterday + (now - today));
+  const { avg, days } = await averageDaily(device.id, today);
 
   res.json({
     hasDevice: true,
     now,
     today: { liters: round1(todayTotal), changePct: changePct(todayTotal, yesterdaySameTime) },
-    yesterday: { liters: round1(sumBetween(device.id, yesterday, today)) },
+    yesterday: { liters: round1(await sumBetween(device.id, yesterday, today)) },
     average: { liters: round1(avg), days },
-    hourly: hourlyTotals(device.id, today).map(round1),
-    anomalyHours: anomalyHours(req.userId, today),
+    hourly: (await hourlyTotals(device.id, today)).map(round1),
+    anomalyHours: await anomalyHours(req.userId, today),
     unreadAlerts,
     latestAlert,
-    device: { name: device.name, ...deviceHealth(device, now) },
+    device: { name: device.name, ...(await deviceHealth(device, now)) },
   });
 });
 
-router.get('/consumption/day', (req, res) => {
-  const device = getDevice(req.userId);
+router.get('/consumption/day', async (req, res) => {
+  const device = await getDevice(req.userId);
   const now = Date.now();
   const day = dayParam(req.query.date, now);
   const dayEnd = addDays(day, 1);
   if (!device) return res.json({ date: dayKey(day), total: 0, hourly: Array(24).fill(0), anomalyHours: [], alerts: [] });
 
-  const hourly = hourlyTotals(device.id, day).map(round1);
+  const hourly = (await hourlyTotals(device.id, day)).map(round1);
   res.json({
     date: dayKey(day),
     total: round1(hourly.reduce((a, b) => a + b, 0)),
-    average: round1(averageDaily(device.id, day).avg),
+    average: round1((await averageDaily(device.id, day)).avg),
     hourly,
-    anomalyHours: anomalyHours(req.userId, day),
-    alerts: alertsInRange.all(req.userId, dayEnd, day).map(toAlert),
+    anomalyHours: await anomalyHours(req.userId, day),
+    alerts: (await alertsInRange(req.userId, dayEnd, day)).map(toAlert),
   });
 });
 
-router.get('/consumption/week', (req, res) => {
-  const device = getDevice(req.userId);
+router.get('/consumption/week', async (req, res) => {
+  const device = await getDevice(req.userId);
   const endDay = dayParam(req.query.end, Date.now());
   const startDay = addDays(endDay, -6);
-  const totals = dailyTotals(device?.id ?? 0, startDay, addDays(endDay, 1));
+  const totals = await dailyTotals(device?.id ?? 0, startDay, addDays(endDay, 1));
   const days = [...totals].map(([date, liters]) => ({ date, liters: round1(liters) }));
   const withData = days.filter((d) => d.liters > 0);
 
@@ -107,8 +108,8 @@ router.get('/consumption/week', (req, res) => {
   });
 });
 
-router.get('/consumption/month', (req, res) => {
-  const device = getDevice(req.userId);
+router.get('/consumption/month', async (req, res) => {
+  const device = await getDevice(req.userId);
   const now = Date.now();
 
   let year, month;
@@ -123,7 +124,7 @@ router.get('/consumption/month', (req, res) => {
 
   const first = new Date(year, month, 1).getTime();
   const next = new Date(year, month + 1, 1).getTime();
-  const totals = dailyTotals(device?.id ?? 0, first, next);
+  const totals = await dailyTotals(device?.id ?? 0, first, next);
   const days = [...totals].map(([date, liters]) => ({
     date,
     liters: parseDayKey(date) > now ? null : round1(liters),
@@ -147,11 +148,11 @@ router.get('/consumption/month', (req, res) => {
   const prevFirst = new Date(year, month - 1, 1).getTime();
   const isCurrent = now >= first && now < next;
   const prevEnd = isCurrent ? Math.min(prevFirst + (now - first), first) : first;
-  const prevTotal = device ? sumBetween(device.id, prevFirst, prevEnd) : 0;
+  const prevTotal = device ? await sumBetween(device.id, prevFirst, prevEnd) : 0;
 
   const alertDates = new Set();
   if (device) {
-    for (const a of alertsInRange.all(req.userId, next, first)) alertDates.add(dayKey(Math.max(a.period_start, first)));
+    for (const a of await alertsInRange(req.userId, next, first)) alertDates.add(dayKey(Math.max(a.period_start, first)));
   }
 
   res.json({

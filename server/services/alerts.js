@@ -1,25 +1,21 @@
 import { db } from '../db.js';
 import { getSettings } from '../models.js';
-import { MIN, HOUR, addDays, formatDate, formatLiters, formatTime, startOfDay } from '../time.js';
-import { averageDaily, readingsBetween, sumBetween } from './stats.js';
+import { MIN, HOUR, addDays, dayKey, formatDate, formatLiters, formatTime, startOfDay } from '../time.js';
+import { readingsBetween, sumBetween } from './stats.js';
 
 // Leituras separadas por até 1 minuto sem fluxo ainda contam como o mesmo uso contínuo.
 const RUN_GAP = 2 * MIN;
 // Um vazamento pode ter começado bem antes da leitura que acabou de chegar.
 const LOOKBACK = 24 * HOUR;
+// Dias usados para calcular a média diária.
+const AVERAGE_DAYS = 14;
 // Avisa a manutenção quando o uso chega a 90% da capacidade estimada.
 const MAINTENANCE_THRESHOLD = 0.9;
 
-const findByKey = db.prepare('SELECT id FROM alerts WHERE dedupe_key = ?');
-const insertAlert = db.prepare(`
+const INSERT_ALERT = `
   INSERT INTO alerts (user_id, device_id, type, severity, title, message, period_start, period_end, liters, created_at, dedupe_key)
   VALUES (:userId, :deviceId, :type, :severity, :title, :message, :periodStart, :periodEnd, :liters, :createdAt, :key)
-`);
-const updateAlert = db.prepare(
-  'UPDATE alerts SET message = :message, period_end = :periodEnd, liters = :liters WHERE id = :id',
-);
-const userEmail = db.prepare('SELECT email FROM users WHERE id = ?');
-const supersede = db.prepare('UPDATE alerts SET read_at = ? WHERE dedupe_key = ? AND read_at IS NULL');
+`;
 
 /**
  * Analisa as leituras do dispositivo a partir de `from` e cria (ou atualiza) os alertas:
@@ -30,31 +26,44 @@ const supersede = db.prepare('UPDATE alerts SET read_at = ? WHERE dedupe_key = ?
  *  - maintenance: hora de limpar a vela ou esvaziar o reservatório
  * Retorna somente os alertas novos.
  */
-export function evaluateDevice(device, { from, to = Date.now(), silent = false }) {
-  const settings = getSettings(device.user_id);
+export async function evaluateDevice(device, { from, to = Date.now(), silent = false }) {
+  const settings = await getSettings(device.user_id);
   const created = [];
+  const pending = [];
 
-  const emit = (alert) => {
-    const row = { userId: device.user_id, deviceId: device.id, ...alert };
-    const existing = findByKey.get(row.key);
+  // As regras só decidem o que avisar; a gravação no banco acontece depois, em sequência.
+  const emit = (alert) => pending.push({ userId: device.user_id, deviceId: device.id, ...alert });
+
+  // Busca as leituras uma vez só (inclui os dias anteriores, para a média),
+  // em vez de consultar o banco dia por dia.
+  const rows = await readingsBetween(device.id, addDays(startOfDay(from), -AVERAGE_DAYS), to + MIN);
+  const supersedes = checkRuns(device, settings, rows, from, emit);
+  checkDaily(device, settings, rows, from, to, emit);
+  await checkMaintenance(device, to, emit);
+
+  for (const row of pending) {
+    const existing = await db.get('SELECT id FROM alerts WHERE dedupe_key = ?', [row.key]);
     if (existing) {
-      updateAlert.run({ id: existing.id, message: row.message, periodEnd: row.periodEnd, liters: row.liters });
-      return;
+      await db.run('UPDATE alerts SET message = :message, period_end = :periodEnd, liters = :liters WHERE id = :id', {
+        id: existing.id, message: row.message, periodEnd: row.periodEnd, liters: row.liters,
+      });
+      continue;
     }
-    const { lastInsertRowid } = insertAlert.run(row);
-    created.push({ id: Number(lastInsertRowid), ...row });
-  };
+    const { lastInsertRowid } = await db.run(INSERT_ALERT, row);
+    created.push({ id: lastInsertRowid, ...row });
+  }
+  // Quando vira possível vazamento, o aviso de madrugada do mesmo uso deixa de ficar pendente.
+  for (const [readAt, key] of supersedes) {
+    await db.run('UPDATE alerts SET read_at = ? WHERE dedupe_key = ? AND read_at IS NULL', [readAt, key]);
+  }
 
-  checkRuns(device, settings, from, to, emit);
-  checkDaily(device, settings, from, to, emit);
-  checkMaintenance(device, to, emit);
-
-  if (!silent) for (const alert of created) notify(alert, settings);
+  if (!silent) for (const alert of created) await notify(alert, settings);
   return created;
 }
 
-function checkRuns(device, settings, from, to, emit) {
-  const rows = readingsBetween(device.id, from - LOOKBACK, to + MIN);
+function checkRuns(device, settings, allRows, from, emit) {
+  const rows = allRows.filter((r) => r.ts >= from - LOOKBACK);
+  const supersedes = [];
 
   for (const run of findRuns(rows)) {
     if (run.end <= from) continue;
@@ -95,19 +104,23 @@ function checkRuns(device, settings, from, to, emit) {
       });
     }
 
-    // Quando vira possível vazamento, o aviso de madrugada do mesmo uso deixa de ficar pendente.
-    if (minutes >= settings.leak_minutes) supersede.run(run.start + settings.leak_minutes * MIN, `night:${device.id}:${run.start}`);
+    if (minutes >= settings.leak_minutes) supersedes.push([run.start + settings.leak_minutes * MIN, `night:${device.id}:${run.start}`]);
   }
+  return supersedes;
 }
 
-function checkDaily(device, settings, from, to, emit) {
+function checkDaily(device, settings, allRows, from, to, emit) {
+  const totalsByDay = new Map();
+  for (const r of allRows) totalsByDay.set(dayKey(r.ts), (totalsByDay.get(dayKey(r.ts)) ?? 0) + r.liters);
+
   for (let day = startOfDay(from); day <= to; day = addDays(day, 1)) {
-    const rows = readingsBetween(device.id, day, Math.min(addDays(day, 1), to + MIN));
+    const dayEnd = Math.min(addDays(day, 1), to + MIN);
+    const rows = allRows.filter((r) => r.ts >= day && r.ts < dayEnd);
     if (!rows.length) continue;
 
     const total = rows.reduce((sum, r) => sum + r.liters, 0);
     const periodEnd = rows.at(-1).ts + MIN;
-    const { avg, days } = averageDaily(device.id, day);
+    const { avg, days } = averageBefore(totalsByDay, day);
 
     // Só compara com a média depois de ter pelo menos uma semana de histórico.
     const threshold = avg * (1 + settings.tolerance_pct / 100);
@@ -144,7 +157,18 @@ function checkDaily(device, settings, from, to, emit) {
   }
 }
 
-function checkMaintenance(device, to, emit) {
+// Mesma regra de stats.averageDaily, mas usando os totais já calculados.
+function averageBefore(totalsByDay, dayStart) {
+  const totals = [];
+  for (let d = addDays(dayStart, -AVERAGE_DAYS); d < dayStart; d = addDays(d, 1)) {
+    const v = totalsByDay.get(dayKey(d)) ?? 0;
+    if (v > 0) totals.push(v);
+  }
+  const avg = totals.length ? totals.reduce((a, b) => a + b, 0) / totals.length : 0;
+  return { avg, days: totals.length };
+}
+
+async function checkMaintenance(device, to, emit) {
   const parts = [
     {
       kind: 'filter',
@@ -163,7 +187,7 @@ function checkMaintenance(device, to, emit) {
   ];
 
   for (const part of parts) {
-    const used = sumBetween(device.id, part.since, to + MIN);
+    const used = await sumBetween(device.id, part.since, to + MIN);
     if (used < part.capacity * MAINTENANCE_THRESHOLD) continue;
     const pct = Math.round((used / part.capacity) * 100);
     emit({
@@ -215,9 +239,9 @@ function crossingTime(rows, limit) {
   return rows.at(-1).ts + MIN;
 }
 
-function notify(alert, settings) {
+async function notify(alert, settings) {
   if (!settings.notify_anomaly || !settings.notify_email) return;
   // Envio de e-mail real precisa de um servidor SMTP; por enquanto só registramos no console.
-  const { email } = userEmail.get(alert.userId);
+  const { email } = await db.get('SELECT email FROM users WHERE id = ?', [alert.userId]);
   console.log(`[e-mail simulado] Para ${email}: ${alert.title} — ${alert.message}`);
 }

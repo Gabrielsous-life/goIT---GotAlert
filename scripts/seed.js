@@ -2,7 +2,7 @@
 // Uso: npm run seed   (apaga e recria só a conta de demonstração)
 import { DEMO_DEVICE_KEY, DEMO_EMAIL, DEMO_PASSWORD } from '../server/config.js';
 import bcrypt from 'bcryptjs';
-import { db, transaction } from '../server/db.js';
+import { closeDb, db, dialect, transaction } from '../server/db.js';
 import { recordReadings } from '../server/services/device.js';
 import { MIN, addDays, startOfDay } from '../server/time.js';
 
@@ -65,29 +65,32 @@ const now = Date.now();
 const today = startOfDay(now);
 const firstDay = addDays(today, -DAYS);
 
-const deviceId = transaction(() => {
-  db.prepare('DELETE FROM users WHERE email = ?').run(DEMO_EMAIL);
-  db.prepare('DELETE FROM devices WHERE device_key = ?').run(DEMO_DEVICE_KEY);
+console.log(`Criando a conta de demonstração no ${dialect === 'mysql' ? 'TiDB/MySQL' : 'SQLite'}...`);
 
-  const { lastInsertRowid: userId } = db
-    .prepare('INSERT INTO users (name, email, phone, password_hash, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run('Júlia Souza', DEMO_EMAIL, '(43) 90000-0000', bcrypt.hashSync(DEMO_PASSWORD, 10), firstDay);
-  db.prepare('INSERT INTO settings (user_id) VALUES (?)').run(userId);
+const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 10);
+const deviceId = await transaction(async (tx) => {
+  await tx.run('DELETE FROM users WHERE email = ?', [DEMO_EMAIL]);
+  await tx.run('DELETE FROM devices WHERE device_key = ?', [DEMO_DEVICE_KEY]);
 
-  const { lastInsertRowid } = db
-    .prepare(`
-      INSERT INTO devices (user_id, name, device_key, street, district, city, state, cep,
-        filter_cleaned_at, reservoir_emptied_at, last_seen_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    .run(
+  const { lastInsertRowid: userId } = await tx.run(
+    'INSERT INTO users (name, email, phone, password_hash, created_at) VALUES (?, ?, ?, ?, ?)',
+    ['Júlia Souza', DEMO_EMAIL, '(43) 90000-0000', passwordHash, firstDay],
+  );
+  await tx.run('INSERT INTO settings (user_id) VALUES (?)', [userId]);
+
+  const { lastInsertRowid } = await tx.run(
+    `INSERT INTO devices (user_id, name, device_key, street, district, city, state, cep,
+       filter_cleaned_at, reservoir_emptied_at, last_seen_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
       userId, 'GotAlert da casa', DEMO_DEVICE_KEY,
       'Rua das Nascentes, 100', 'Centro', 'Londrina', 'PR', '86000-000',
       addDays(today, -26) + 9 * 60 * MIN, // vela limpa há 26 dias
       addDays(today, -10) + 9 * 60 * MIN, // reservatório esvaziado há 10 dias
       now, firstDay,
-    );
-  return Number(lastInsertRowid);
+    ],
+  );
+  return lastInsertRowid;
 });
 
 const readings = [];
@@ -119,13 +122,18 @@ for (let day = firstDay; day <= today; day = addDays(day, 1)) {
   readings.push(...toReadings(day, events, target));
 }
 
-const device = db.prepare('SELECT * FROM devices WHERE id = ?').get(deviceId);
+const device = await db.get('SELECT * FROM devices WHERE id = ?', [deviceId]);
 const past = readings.filter((r) => r.ts < now);
-const { accepted, alerts } = recordReadings(device, past, { now, silent: true });
+const { accepted, alerts } = await recordReadings(device, past, { now, silent: true });
 
 // Alertas com mais de 2 dias já foram vistos pela usuária.
-db.prepare('UPDATE alerts SET read_at = created_at + 3600000 WHERE device_id = ? AND created_at < ?').run(deviceId, now - 2 * 24 * 60 * MIN);
+await db.run('UPDATE alerts SET read_at = created_at + 3600000 WHERE device_id = ? AND created_at < ?', [
+  deviceId,
+  now - 2 * 24 * 60 * MIN,
+]);
 
 console.log(`Conta de demonstração criada: ${DEMO_EMAIL} / ${DEMO_PASSWORD}`);
 console.log(`Chave do dispositivo: ${DEMO_DEVICE_KEY}`);
 console.log(`${accepted} leituras em ${DAYS + 1} dias, ${alerts.length} alertas gerados.`);
+
+await closeDb();
